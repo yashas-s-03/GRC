@@ -7,11 +7,12 @@ const axios = require('axios');
 const tls = require('tls');
 const dns = require('dns').promises;
 const cheerio = require('cheerio');
+const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
+const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || "us-east-1" });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const HIBP_KEY = process.env.HIBP_API_KEY || '';
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
@@ -1306,11 +1307,11 @@ app.get('/api/scan/stream', async (req, res) => {
         summary: "Stripe's security posture is exceptionally strong, with valid TLS 1.3, all critical headers present, and clean DNS records — this is the gold standard most startups should aim for. The only area worth monitoring is the high number of third-party scripts loaded on the homepage, each representing a small but real supply-chain risk. Overall this is an A-grade site and a great benchmark to compare your own startup against.",
         fallback: false
       };
-    } else if (!ANTHROPIC_API_KEY || ANTHROPIC_API_KEY === 'your_key_here') {
+    } else if (!process.env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID === 'your_key_here') {
       aiSummary = {
         summary: null,
         fallback: true,
-        message: "AI Analysis unavailable — add your ANTHROPIC_API_KEY to server/.env to enable this feature."
+        message: "AI Analysis unavailable — add your AWS Bedrock credentials to server/.env to enable this feature."
       };
     } else {
       try {
@@ -1334,19 +1335,19 @@ Be direct, use plain English, no jargon.
 Sound like a senior security auditor advising a first-time founder.
 Do not use bullet points or markdown styling. Just output the sentences clearly.`;
 
-        const response = await axios.post('https://api.anthropic.com/v1/messages', {
-          model: 'claude-opus-4-5',
-          max_tokens: 200,
-          messages: [{ role: 'user', content: prompt }]
-        }, {
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01'
-          },
-          timeout: 10000
+        const command = new InvokeModelCommand({
+          modelId: "anthropic.claude-3-sonnet-20240229-v1:0",
+          body: JSON.stringify({
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 300,
+            messages: [{ role: "user", content: prompt }]
+          }),
+          contentType: "application/json"
         });
-        aiSummary = { summary: response.data.content[0].text, fallback: false };
+
+        const response = await bedrockClient.send(command);
+        const result = JSON.parse(new TextDecoder().decode(response.body));
+        aiSummary = { summary: result.content[0].text, fallback: false };
       } catch (e) {
         console.error('Claude API failed:', e.message);
         aiSummary = { summary: null, fallback: true, message: "AI Analysis unavailable — API error." };
