@@ -14,7 +14,25 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const HIBP_KEY = process.env.HIBP_API_KEY || '';
 
-app.use(cors({ origin: '*' }));
+const allowedOrigins = [
+  'http://localhost:3000',
+  process.env.FRONTEND_URL,  // set in Railway env vars
+].filter(Boolean);
+
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (mobile apps, curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.some(allowed => 
+      origin === allowed || 
+      origin.endsWith('.vercel.app')
+    )) {
+      return callback(null, true);
+    }
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // ─── In-memory scan store ─────────────────────────────────────────────────────
@@ -1426,6 +1444,17 @@ app.get('/api/badge/:scanId', (req, res) => {
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    version: '2.0.0',
+    timestamp: new Date().toISOString(),
+    checks: 23
+  });
+});
+
 app.get('/api/health', (_, res) => res.json({ status: 'ok', version: '2.0.0' }));
 
-app.listen(PORT, () => console.log(`TrustLens API v2 running on http://localhost:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`TrustLens backend running on port ${PORT}`);
+});

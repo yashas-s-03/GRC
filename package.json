@@ -1,13 +1,14 @@
 {
-  "name": "trustlens-root",
+  "name": "trustlens",
+  "version": "2.0.0",
   "private": true,
-  "version": "1.0.0",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "server": "npm --prefix server start",
-    "client": "npm --prefix client run dev"
+    "dev": "concurrently \"npm run client\" \"npm run server\"",
+    "client": "cd client && npm run dev",
+    "server": "cd server && node index.js",
+    "install:all": "npm install && cd client && npm install && cd ../server && npm install"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.0.0"
   }
 }

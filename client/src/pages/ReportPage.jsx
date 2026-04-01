@@ -7,7 +7,7 @@ import {
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import PDFReportTemplate from '../components/PDFReportTemplate'
-
+import API from '../config'
 function TrustBadge({ score, grade, domain, color }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="220" height="68" viewBox="0 0 220 68">
@@ -25,7 +25,7 @@ function TrustBadge({ score, grade, domain, color }) {
   );
 }
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+// API Config imported at top
 const CLIENT = window.location.origin
 
 // ─── Score band (mirrors backend) ────────────────────────────────────────────

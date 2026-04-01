@@ -4,7 +4,10 @@
   "private": true,
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "nodemon index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
