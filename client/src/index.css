@@ -167,42 +167,33 @@
   }
   
   .pdf-capture-mode {
-    background-color: #f8fafc !important;
+    background: #ffffff !important;
     color: #0f172a !important;
   }
-
   .pdf-capture-mode * {
     color: #0f172a !important;
     border-color: #e2e8f0 !important;
   }
-
-  .pdf-capture-mode .bg-\[\#12121a\],
-  .pdf-capture-mode [style*="background: #12121a"],
-  .pdf-capture-mode [style*="background-color: #12121a"],
-  .pdf-capture-mode [style*="background-color: rgb(18, 18, 26)"] {
-    background-color: #ffffff !important;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
+  .pdf-capture-mode [class*="bg-[#12121a]"],
+  .pdf-capture-mode [class*="bg-[#0a0a0f]"],
+  .pdf-capture-mode [class*="bg-[#1e1e2e]"] {
+    background-color: #f8fafc !important;
   }
-
   .pdf-capture-mode .text-slate-400,
-  .pdf-capture-mode [style*="color: #94a3b8"],
-  .pdf-capture-mode [style*="color: rgb(148, 163, 184)"] {
+  .pdf-capture-mode .text-gray-400,
+  .pdf-capture-mode [class*="text-slate"],
+  .pdf-capture-mode [class*="text-gray"] {
     color: #64748b !important;
   }
-
-  .pdf-capture-mode .text-white,
-  .pdf-capture-mode .text-slate-500,
-  .pdf-capture-mode [style*="color: #f8fafc"],
-  .pdf-capture-mode [style*="color: rgb(248, 250, 252)"] {
-    color: #0f172a !important;
+  .pdf-capture-mode .bg-red-500,
+  .pdf-capture-mode .bg-amber-500,
+  .pdf-capture-mode .bg-green-500,
+  .pdf-capture-mode .bg-indigo-500 {
+    color: #ffffff !important;
   }
-
-  .pdf-capture-mode [style*="background: #1e1e2e"],
-  .pdf-capture-mode [style*="background-color: rgb(30, 30, 46)"] {
-    background-color: #f1f5f9 !important;
-  }
-
-  .pdf-capture-mode .btn-primary {
-    color: white !important;
+  .pdf-capture-mode pre,
+  .pdf-capture-mode code {
+    background-color: #1e293b !important;
+    color: #e2e8f0 !important;
   }
 }

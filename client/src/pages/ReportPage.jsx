@@ -277,59 +277,157 @@ export default function ReportPage({ scanResult: propResult, showToast }) {
   }
 
   const downloadPDF = async () => {
-    if (generatingPDF) return;
     setGeneratingPDF(true);
     
-    const reportElement = document.getElementById('pdf-export-template');
+    // Show toast that PDF is being generated
+    if (showToast) showToast('Generating your PDF report...', 'info');
+    
+    const reportElement = document.getElementById('report-content');
     if (!reportElement) {
       setGeneratingPDF(false);
       return;
     }
     
-    // Wait for template to render
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Temporarily apply light mode styles
+    const originalStyles = {
+      background: document.body.style.background,
+      color: document.body.style.color
+    };
+    
+    // Apply light mode wrapper class
+    reportElement.classList.add('pdf-capture-mode');
+    document.body.style.background = '#ffffff';
+    document.body.style.color = '#0f172a';
+    
+    // Wait for paint
+    await new Promise(r => setTimeout(r, 500));
     
     try {
       const canvas = await html2canvas(reportElement, {
-        backgroundColor: '#f8fafc',
-        scale: 2,
+        backgroundColor: '#ffffff',
+        scale: 1.5,           // Lower scale = smaller file, less cutting
         useCORS: true,
         allowTaint: true,
-        windowWidth: 800
+        logging: false,
+        imageTimeout: 5000,
+        scrollX: 0,
+        scrollY: 0,
+        windowWidth: 1200,
+        windowHeight: reportElement.scrollHeight,
+        height: reportElement.scrollHeight,
+        width: reportElement.scrollWidth
       });
       
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF('p', 'mm', 'a4');
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const imgHeight = (canvas.height * pdfWidth) / canvas.width;
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+        compress: true
+      });
       
-      let heightLeft = imgHeight;
-      let position = 0;
-      const pageHeight = pdf.internal.pageSize.getHeight();
+      const pdfWidth = pdf.internal.pageSize.getWidth();    // 210mm
+      const pdfHeight = pdf.internal.pageSize.getHeight();  // 297mm
+      const margin = 10; // 10mm margins
+      const contentWidth = pdfWidth - (margin * 2);
       
-      pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeight);
-      heightLeft -= pageHeight;
+      const imgWidth = contentWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
       
-      while (heightLeft >= 0) {
-        position = heightLeft - imgHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeight);
-        heightLeft -= pageHeight;
+      // Add header to first page
+      pdf.setFillColor(99, 102, 241); // indigo
+      pdf.rect(0, 0, pdfWidth, 12, 'F');
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFontSize(10);
+      pdf.text('TrustLens — GRCU Security Report', margin, 8);
+      pdf.text(
+        `${result?.domain} · ${new Date().toLocaleDateString()}`, 
+        pdfWidth - margin, 
+        8, 
+        { align: 'right' }
+      );
+      
+      const startY = 15; // start below header
+      const usableHeight = pdfHeight - startY - margin;
+      
+      // Split into pages
+      let remainingHeight = imgHeight;
+      let sourceY = 0;
+      let isFirstPage = true;
+      
+      while (remainingHeight > 0) {
+        if (!isFirstPage) {
+          pdf.addPage();
+          // Add header on subsequent pages too
+          pdf.setFillColor(99, 102, 241);
+          pdf.rect(0, 0, pdfWidth, 12, 'F');
+          pdf.setTextColor(255, 255, 255);
+          pdf.setFontSize(10);
+          pdf.text('TrustLens — GRCU Security Report', margin, 8);
+          pdf.text(
+            `${result?.domain} · ${new Date().toLocaleDateString()}`, 
+            pdfWidth - margin, 
+            8, 
+            { align: 'right' }
+          );
+        }
+        
+        const pageImgHeight = Math.min(remainingHeight, usableHeight);
+        const sourceHeight = (pageImgHeight * canvas.width) / imgWidth;
+        
+        // Create a slice of the canvas for this page
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.width = canvas.width;
+        pageCanvas.height = sourceHeight;
+        const ctx = pageCanvas.getContext('2d');
+        ctx.drawImage(
+          canvas, 
+          0, sourceY,           // source x, y
+          canvas.width, sourceHeight, // source width, height
+          0, 0,                 // dest x, y
+          canvas.width, sourceHeight  // dest width, height
+        );
+        
+        const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.92);
+        pdf.addImage(
+          pageImgData, 'JPEG', 
+          margin, startY,
+          imgWidth, pageImgHeight
+        );
+        
+        sourceY += sourceHeight;
+        remainingHeight -= pageImgHeight;
+        isFirstPage = false;
       }
       
-      pdf.setProperties({
-        title: `TrustLens Report — ${result.domain || 'report'}`,
-        subject: 'GRCU Security & Trust Score Report',
-        author: 'TrustLens',
-        creator: 'TrustLens — trustlens.io'
-      });
+      // Add footer with page numbers
+      const pageCount = pdf.internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        pdf.setPage(i);
+        pdf.setFontSize(8);
+        pdf.setTextColor(148, 163, 184);
+        pdf.text(
+          `Page ${i} of ${pageCount} · Generated by TrustLens`,
+          pdfWidth / 2,
+          pdfHeight - 5,
+          { align: 'center' }
+        );
+      }
       
-      pdf.save(`TrustLens-${result.domain || 'report'}-${new Date().toISOString().split('T')[0]}.pdf`);
+      const filename = `TrustLens-${(result?.domain || 'report').replace(/\./g, '-')}-${
+        new Date().toISOString().split('T')[0]
+      }.pdf`;
       
-    } catch(e) {
-      console.error(e);
-      showToast?.('Expected PDF download to succeed, but got error', 'error');
+      pdf.save(filename);
+      if (showToast) showToast('PDF downloaded successfully ✓', 'success');
+      
+    } catch (error) {
+      console.error('PDF generation error:', error);
+      if (showToast) showToast('PDF generation failed. Try again.', 'error');
     } finally {
+      // Always restore dark mode
+      reportElement.classList.remove('pdf-capture-mode');
+      document.body.style.background = originalStyles.background;
+      document.body.style.color = originalStyles.color;
       setGeneratingPDF(false);
     }
   };
@@ -391,6 +489,23 @@ export default function ReportPage({ scanResult: propResult, showToast }) {
   return (
     <div id="report-content" style={{ maxWidth: 960, margin: '0 auto', padding: '3rem 1.5rem', background: '#0a0a0f' }}>
 
+      {/* Exposed Paths Critical Banner (FIX 8 & 9) */}
+      {checks.some(c => c.id === 'exposed_paths' && c.status === 'fail' && c.severity === 'critical') && (
+        <div className="w-full bg-red-500/10 border border-red-500/50 rounded-2xl p-4 mb-6 flex items-center gap-3">
+          <span className="text-red-400 text-2xl">🚨</span>
+          <div>
+            <p className="text-red-400 font-bold text-sm">
+              CRITICAL: Sensitive files are publicly accessible
+            </p>
+            <p className="text-red-300 text-xs mt-1">
+              Your .env or config files may be exposing API keys, 
+              database credentials, and secrets right now.
+              Fix this immediately before anything else.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Critical warning banner */}
       {scores.grade === 'D' && (
         <div style={{ background: '#1a0808', border: '1px solid #ef444440', borderRadius: '0.75rem', padding: '0.875rem 1.25rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -436,7 +551,19 @@ export default function ReportPage({ scanResult: propResult, showToast }) {
         <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: '2rem' }}>Scanned on {fmt(scannedAt)}</p>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3rem', alignItems: 'center' }}>
-          <ScoreDial score={scores.total} color={band.color} />
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
+            <ScoreDial score={scores.total} color={band.color} />
+            {scores.confidencePenalty > 0 && (
+              <div style={{
+                background: '#12121a', border: '1px solid #2e2e3e', borderRadius: '0.5rem',
+                padding: '0.5rem 0.75rem', fontSize: '0.75rem', color: '#94a3b8', maxWidth: '220px',
+                textAlign: 'center', lineHeight: 1.4
+              }}>
+                <span style={{color: '#f59e0b'}}>⚠</span> Scanner confidence: Medium. 
+                This site blocked some checks. Score adjusted by -{scores.confidencePenalty}.
+              </div>
+            )}
+          </div>
           <div style={{ flex: 1, minWidth: 200 }}>
             <div className="flex items-center gap-3 mb-2" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
               <h1 className="text-5xl font-bold text-white" style={{ fontSize: '3rem', fontWeight: 700, color: 'white', margin: 0, lineHeight: 1 }}>
