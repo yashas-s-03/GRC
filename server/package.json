@@ -7,7 +7,7 @@
     "dev": "nodemon index.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1021.0",
