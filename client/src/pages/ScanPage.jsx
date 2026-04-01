@@ -5,7 +5,7 @@ import {
   Globe, Building2, Mail, Loader2, Check, XCircle, CheckCircle, AlertCircle
 } from 'lucide-react'
 
-const API = 'http://localhost:3001'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
 // ── URL validation ────────────────────────────────────────────────────────────
 function validateURL(input) {

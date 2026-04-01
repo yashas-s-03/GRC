@@ -25,8 +25,8 @@ function TrustBadge({ score, grade, domain, color }) {
   );
 }
 
-const API = 'http://localhost:3001'
-const CLIENT = 'http://localhost:3000'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+const CLIENT = window.location.origin
 
 // ─── Score band (mirrors backend) ────────────────────────────────────────────
 

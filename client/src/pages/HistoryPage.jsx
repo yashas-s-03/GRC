@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield, Clock, RefreshCw, Eye, History } from 'lucide-react'
 
-const API = 'http://localhost:3001'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
 function gradeColor(grade) {
   return grade === 'A' ? '#22c55e' : grade === 'B' ? '#6366f1' : grade === 'C' ? '#f59e0b' : '#ef4444'
