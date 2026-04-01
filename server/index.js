@@ -1321,6 +1321,17 @@ app.get('/api/scan/stream', async (req, res) => {
     
     applyConfidencePenalty(objScores, checks);
 
+    // Apply SSL/HTTPS Cap
+    const sslCheck = checks.find(c => c.id === 'ssl');
+    const httpsCheck = checks.find(c => c.id === 'https_enforcement');
+    if ((sslCheck && sslCheck.status === 'fail' && sslCheck.severity === 'critical') ||
+        (httpsCheck && httpsCheck.status === 'fail')) {
+      if (objScores.total > 49) {
+        objScores.total = 49;
+        objScores.cappedReason = 'Score capped: SSL/HTTPS failure makes this site fundamentally unsafe regardless of other checks passing.';
+      }
+    }
+
     const bandFinal = getScoreBand(objScores.total);
     objScores.grade = bandFinal.grade;
 

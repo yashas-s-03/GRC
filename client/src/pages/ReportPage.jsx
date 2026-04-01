@@ -506,6 +506,17 @@ export default function ReportPage({ scanResult: propResult, showToast }) {
         </div>
       )}
 
+      {/* Capped Score Banner */}
+      {scores.cappedReason && (
+        <div style={{ background: '#1a0808', border: '1px solid #ef444440', borderRadius: '0.75rem', padding: '0.875rem 1.25rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <AlertTriangle size={18} color="#ef4444" style={{ flexShrink: 0 }} />
+          <div>
+            <span style={{ color: '#fca5a5', fontSize: '0.875rem', fontWeight: 600, display: 'block' }}>Score Capped at 49</span>
+            <span style={{ color: '#ef4444', fontSize: '0.8rem' }}>{scores.cappedReason}</span>
+          </div>
+        </div>
+      )}
+
       {/* Critical warning banner */}
       {scores.grade === 'D' && (
         <div style={{ background: '#1a0808', border: '1px solid #ef444440', borderRadius: '0.75rem', padding: '0.875rem 1.25rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
