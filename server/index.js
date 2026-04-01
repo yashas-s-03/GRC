@@ -88,18 +88,39 @@ function normalizeURL(input) {
   }
 }
 
-function extractDomain(input) {
+function extractRootDomain(input) {
   try {
     let u = (input || '').trim();
     if (!u.startsWith('http')) u = 'https://' + u;
-    return new URL(u).hostname.replace(/^www\./, '');
+    const parts = new URL(u).hostname.replace(/^www\./, '').split('.');
+    if (parts.length > 2) {
+      const tld = parts[parts.length - 1];
+      if (['uk', 'au', 'in', 'br', 'jp'].includes(tld)) return parts.slice(-3).join('.');
+      return parts.slice(-2).join('.');
+    }
+    return parts.join('.');
   } catch {
     return input.trim().replace(/^www\./, '');
   }
 }
 
+function classifySite(html, sizeBytes) {
+  const sizeKb = sizeBytes / 1024;
+  const lower = html.toLowerCase();
+  
+  if (/captcha|access denied|forbidden|cloudflare|incapsula|<\s*title[^>]*>\s*attention required/i.test(lower) || sizeKb < 0.5) {
+    return 'bot_blocked';
+  }
+  if (lower.includes('id="root"') || lower.includes('__next_data__') || lower.includes('data-reactroot') || html.split('<script').length > 5 || sizeKb < 30) {
+    return 'spa';
+  }
+  if (sizeKb < 50) return 'webapp';
+  return 'static';
+}
+
 function makeAxios(extra = {}) {
-  return axios.create({ timeout: 10000, validateStatus: () => true, ...extra });
+  // Always allow following redirects up to 5 times to find real final URL
+  return axios.create({ timeout: 10000, maxRedirects: 5, validateStatus: () => true, ...extra });
 }
 
 // ─── Check 1: SSL ─────────────────────────────────────────────────────────────
@@ -329,7 +350,7 @@ async function checkExposedPaths(domain) {
         } else {
           downgraded.push({ path: p.path, originalSeverity: 'medium' });
         }
-      } else if (r.status !== 404 && r.status !== 403) {
+      } else if (r.status !== 404 && r.status !== 403 && r.status !== 401 && r.status !== 301 && r.status !== 302 && r.status !== 307 && r.status !== 308) {
         warnings.push(`${p.path} (${r.status})`);
       }
     } catch { /* not exposed */ }
@@ -533,7 +554,7 @@ async function checkCookieFlags(domain) {
 
 // ─── Check 9: Third-Party Scripts ─────────────────────────────────────────────
 
-async function checkThirdPartyScripts(html, domain) {
+async function checkThirdPartyScripts(html, domain, isEnterprise) {
   try {
     const htmlLength = html.length;
     const $ = cheerio.load(html);
@@ -548,9 +569,16 @@ async function checkThirdPartyScripts(html, domain) {
     });
     let status, severity, detail, fixSteps, points;
     const isJsHeavy = htmlLength < 2500 && count > 3;
-    if (count <= 3) { status = 'pass'; severity = null; detail = `${count} third-party script(s) — within safe limits`; fixSteps = null; points = 7; }
-    else if (count <= 8) { status = 'warning'; severity = 'low'; detail = `${count} third-party scripts (e.g. ${srcs.join(', ')}) — consider reducing`; fixSteps = ["Audit each third-party script for necessity", "Self-host critical libraries where possible", "Use a Content Security Policy to restrict allowed sources"]; points = 3; }
-    else { status = 'fail'; severity = 'medium'; detail = `${count} third-party scripts — too many external attack surfaces`; fixSteps = ["Remove analytics or tag manager scripts you don't use", "Self-host fonts and icons instead of loading from CDN", "Consolidate analytics tools (pick one)", "Add a CSP header allowlisting only approved domains"]; points = 0; }
+    
+    if (isEnterprise) {
+      status = 'pass'; severity = null; detail = `${count} scripts detected, but skipped penalty due to Enterprise application architecture.`; fixSteps = null; points = 7;
+    } else if (count <= 3) { 
+      status = 'pass'; severity = null; detail = `${count} third-party script(s) — within safe limits`; fixSteps = null; points = 7; 
+    } else if (count <= 8) { 
+      status = 'warning'; severity = 'low'; detail = `${count} third-party scripts (e.g. ${srcs.join(', ')}) — consider reducing`; fixSteps = ["Audit each third-party script for necessity", "Self-host critical libraries where possible"]; points = 3; 
+    } else { 
+      status = 'fail'; severity = 'medium'; detail = `${count} third-party scripts — too many external attack surfaces`; fixSteps = ["Remove unused analytics scripts", "Self-host fonts and icons"]; points = 0; 
+    }
     return { id: 'third_party_scripts', name: 'Third-Party Scripts', category: 'risk', status, severity, confidence: 'high', confidenceNote: null, detail, fix: fixSteps?.[0] || null, fixSteps, _count: count, _htmlLength: htmlLength, _isJsHeavy: isJsHeavy, points };
   } catch (e) {
     return { id: 'third_party_scripts', name: 'Third-Party Scripts', category: 'risk', status: 'warning', severity: 'low', confidence: 'medium', confidenceNote: 'Could not fetch page HTML to analyze scripts', detail: 'Could not analyze scripts: ' + e.message, fix: null, fixSteps: null, _count: 0, _isJsHeavy: false, points: 0 };
@@ -559,7 +587,7 @@ async function checkThirdPartyScripts(html, domain) {
 
 // ─── Check 10: Privacy Policy ─────────────────────────────────────────────────
 
-async function checkPrivacyPolicy(html, domain) {
+async function checkPrivacyPolicy(html, domain, siteClass) {
   try {
     const $ = cheerio.load(html);
     let found = false, foundUrl = '';
@@ -570,26 +598,31 @@ async function checkPrivacyPolicy(html, domain) {
     });
     if (!found) {
       for (const p of ['/privacy', '/privacy-policy', '/privacy_policy']) {
-        try { const r = await makeAxios().get(`https://${domain}${p}`); if (r.status === 200) { found = true; foundUrl = p; break; } } catch { /* continue */ }
+        try { const r = await makeAxios({ maxRedirects: 2 }).get(`https://${domain}${p}`); if (r.status === 200) { found = true; foundUrl = p; break; } } catch { /* continue */ }
       }
     }
+    
+    if (!found && (siteClass === 'spa' || siteClass === 'bot_blocked' || siteClass === 'webapp')) {
+      return { id: 'privacy_policy', name: 'Privacy Policy', category: 'governance', status: 'warning', severity: 'medium', confidence: 'low', confidenceNote: 'Site is dynamic/protected — scanner could not reliably find links', detail: 'No privacy policy detected, but scanner has low confidence due to site architecture.', fix: "Verify you have a privacy policy linked in your footer.", fixSteps: ["Check manually if privacy policy exists"], _found: false, points: 6 };
+    }
+
     return {
       id: 'privacy_policy', name: 'Privacy Policy', category: 'governance',
       status: found ? 'pass' : 'fail', severity: found ? null : 'medium',
-      confidence: 'medium', confidenceNote: found ? 'Detected via link text — confirm the page is complete and GDPR-compliant' : null,
-      detail: found ? `Privacy policy found${foundUrl ? ` at ${foundUrl}` : ''}` : 'No privacy policy detected',
+      confidence: 'high', confidenceNote: found ? 'Detected via link text' : null,
+      detail: found ? `Privacy policy found${foundUrl ? ` at ${foundUrl}` : ''}` : 'No privacy policy detected on homepage or common paths',
       fix: found ? null : "Create a privacy policy and link it in your footer.",
-      fixSteps: found ? null : ["Create a privacy policy page (use a generator: iubenda.com)", "Link it in your site footer on every page", "Ensure it covers: what data you collect, why, and user rights"],
+      fixSteps: found ? null : ["Create a privacy policy page (use a generator)", "Link it in your site footer on every page"],
       _found: found, points: 8,
     };
   } catch (e) {
-    return { id: 'privacy_policy', name: 'Privacy Policy', category: 'governance', status: 'warning', severity: 'medium', confidence: 'low', confidenceNote: 'Could not fetch homepage to check', detail: 'Could not verify: ' + e.message, fix: "Ensure a privacy policy page exists and is linked from your footer.", fixSteps: ["Create privacy policy page and link it in footer"], _found: false, points: 0 };
+    return { id: 'privacy_policy', name: 'Privacy Policy', category: 'governance', status: 'warning', severity: 'medium', confidence: 'low', confidenceNote: 'Could not fetch homepage', detail: 'Could not verify: ' + e.message, fix: "Ensure privacy policy exists.", fixSteps: ["Link it in footer"], _found: false, points: 0 };
   }
 }
 
 // ─── Check 11: Terms of Service ───────────────────────────────────────────────
 
-async function checkToS(html, domain) {
+async function checkToS(html, domain, siteClass) {
   try {
     const $ = cheerio.load(html);
     let found = false, foundUrl = '';
@@ -600,20 +633,25 @@ async function checkToS(html, domain) {
     });
     if (!found) {
       for (const p of ['/terms', '/tos', '/terms-of-service', '/terms-and-conditions']) {
-        try { const r = await makeAxios().get(`https://${domain}${p}`); if (r.status === 200) { found = true; foundUrl = p; break; } } catch { /* continue */ }
+        try { const r = await makeAxios({ maxRedirects: 2 }).get(`https://${domain}${p}`); if (r.status === 200) { found = true; foundUrl = p; break; } } catch { /* continue */ }
       }
     }
+
+    if (!found && (siteClass === 'spa' || siteClass === 'bot_blocked' || siteClass === 'webapp')) {
+      return { id: 'terms_of_service', name: 'Terms of Service', category: 'governance', status: 'warning', severity: 'low', confidence: 'low', confidenceNote: 'Low confidence due to site architecture', detail: 'No terms of service detected (low confidence)', fix: "Create a Terms of Service page.", fixSteps: ["Verify manually"], _found: false, points: 5 };
+    }
+
     return {
       id: 'terms_of_service', name: 'Terms of Service', category: 'governance',
       status: found ? 'pass' : 'fail', severity: found ? null : 'low',
-      confidence: 'medium', confidenceNote: null,
+      confidence: 'high', confidenceNote: null,
       detail: found ? `Terms of service found${foundUrl ? ` at ${foundUrl}` : ''}` : 'No terms of service detected',
       fix: found ? null : "Create a Terms of Service page and link it in your footer.",
-      fixSteps: found ? null : ["Create a ToS page (use a generator: termly.io)", "Link it in your site footer", "Key clauses: acceptable use, liability limits, governing law"],
+      fixSteps: found ? null : ["Create a ToS page", "Link it in your site footer"],
       _found: found, points: 7,
     };
   } catch (e) {
-    return { id: 'terms_of_service', name: 'Terms of Service', category: 'governance', status: 'warning', severity: 'low', confidence: 'low', confidenceNote: null, detail: 'Could not verify: ' + e.message, fix: "Create a Terms of Service page.", fixSteps: ["Create ToS page", "Link in footer"], _found: false, points: 0 };
+    return { id: 'terms_of_service', name: 'Terms of Service', category: 'governance', status: 'warning', severity: 'low', confidence: 'low', confidenceNote: null, detail: 'Could not verify: ' + e.message, fix: "Create Terms of Service.", fixSteps: ["Link ToS in footer"], _found: false, points: 0 };
   }
 }
 
@@ -876,98 +914,52 @@ function checkContact(html, domain) {
 
 // ─── Scoring Engine ───────────────────────────────────────────────────────────
 
-function calculateScores(checks, formAnswers = {}) {
+function calculateScores(checks, formAnswers = {}, siteClass, isEnterprise) {
   const get = id => checks.find(c => c.id === id) || {};
   let totalExcluded = 0;
   
-  // Detect JS-heavy / unreadable frontends
-  const isJsHeavy = get('third_party_scripts')._isJsHeavy || false;
-  if (isJsHeavy) {
-    ['privacy_policy', 'terms_of_service', 'cookie_consent'].forEach(id => {
-      const c = get(id);
-      if (c && !c._found) {
-        c._unverified = true;
-        c.status = 'warning';
-        c.detail = 'Unverified (dynamic/JS-heavy site)';
-        c.confidence = 'low';
-        c.confidenceNote = 'Scanner cannot read JS-rendered content reliably';
-      }
-    });
-  }
+  // Weights (max points)
+  const weights = { 
+    gov: 30, risk: 40, comp: 30, ut: 20 
+  };
+  
+  let cf = 1.0;
+  if (siteClass === 'bot_blocked') cf = 0.2;
+  else if (siteClass === 'spa' || siteClass === 'webapp') cf = 0.5;
+  if (isEnterprise) cf = Math.min(cf, 0.4);
 
-  let govEarned = 0, govPossible = 0;
-  let riskEarned = 0, riskPossible = 0;
-  let compEarned = 0, compPossible = 0;
-
-  // GOVERNANCE
-  if (!get('privacy_policy')._unverified) { govPossible += 8; if (get('privacy_policy')._found) govEarned += 8; } else totalExcluded += 8;
-  if (!get('terms_of_service')._unverified) { govPossible += 7; if (get('terms_of_service')._found) govEarned += 7; } else totalExcluded += 7;
-  if (!get('cookie_consent')._unverified) { govPossible += 8; if (get('cookie_consent').status === 'pass') govEarned += 8; } else totalExcluded += 8;
-  if (formAnswers.securityContact === 'Yes' || formAnswers.securityContact === 'No') { govPossible += 7; if (formAnswers.securityContact === 'Yes') govEarned += 7; } else totalExcluded += 7;
-  if (formAnswers.securityAudit === 'Yes' || formAnswers.securityAudit === 'No' || formAnswers.securityAudit === 'Planned') { govPossible += 5; if (formAnswers.securityAudit === 'Yes') govEarned += 5; } else totalExcluded += 5;
-
-  // RISK
-  riskPossible += 10;
-  const ssl = get('ssl');
-  if (ssl._tlsVersion === 'tls13' && ssl._sslValid) riskEarned += 10; else if (ssl._tlsVersion === 'tls12' && ssl._sslValid) riskEarned += 6;
-  riskPossible += 5;
-  if (get('https_enforcement')._httpsEnforced) riskEarned += 5;
-  ['header_content_security_policy','header_strict_transport_security','header_x_frame_options','header_x_content_type_options','header_referrer_policy','header_permissions_policy'].forEach(id => {
-    const hk = get(id);
-    riskPossible += 2;
-    if (hk._present) riskEarned += hk.points || 0; 
-  });
-  riskPossible += 8;
-  if (get('exposed_paths')._noExposure) riskEarned += 8;
-  riskPossible += 7;
-  const sc = get('third_party_scripts')._count || 0;
-  if (sc <= 3) riskEarned += 7; else if (sc <= 8) riskEarned += 3;
-  if (formAnswers.mfa === 'Yes' || formAnswers.mfa === 'No' || formAnswers.mfa === 'Partially') { riskPossible += 3; if (formAnswers.mfa === 'Yes') riskEarned += 3; } else totalExcluded += 3;
-  if (formAnswers.dataStorage && formAnswers.dataStorage !== '') { riskPossible += 2; if (['AWS', 'Google Cloud', 'Azure'].includes(formAnswers.dataStorage)) riskEarned += 2; } else totalExcluded += 2;
-
-  // COMPLIANCE
-  compPossible += 8;
-  if (get('dns_dmarc')._dmarcFound) compEarned += get('dns_dmarc').points || 0;
-  compPossible += 7;
-  if (get('dns_spf')._spfFound) compEarned += get('dns_spf').points || 0;
-  compPossible += 8;
-  if (get('hibp')._noBreaches) compEarned += 8;
-  compPossible += 4;
-  if (get('robots_txt').status === 'pass') compEarned += 4;
-  compPossible += 3;
-  if (get('cookie_flags').status === 'pass' || get('cookie_flags').status === 'warning') compEarned += get('cookie_flags').points || 0;
-  if (formAnswers.incidentResponse === 'Yes' || formAnswers.incidentResponse === 'No') { compPossible += 4; if (formAnswers.incidentResponse === 'Yes') compEarned += 4; } else totalExcluded += 4;
-  if (formAnswers.collectPayments === 'Yes' || formAnswers.collectPayments === 'No') { compPossible += 2; if (['Stripe', 'Razorpay', 'PayPal'].includes(formAnswers.paymentProcessor)) compEarned += 2; } else totalExcluded += 2;
-
-  // Apply severity multipliers (Critical cascade penalties)
+  let govEarned = 30, riskEarned = 40, compEarned = 30, userEarned = 20;
   let criticalFailsCount = 0;
-  checks.filter(c => c.status === 'fail').forEach(c => {
-    if (c.severity === 'critical' && !c._unverified) {
-      criticalFailsCount++;
-      if (c.category === 'risk') riskEarned -= 5;
-      if (c.category === 'compliance') compEarned -= 5;
-      if (c.category === 'governance') govEarned -= 5;
-      if (!c.detail.includes('[Critical Penalty Applied]')) c.detail += ' [Critical Penalty Applied]';
+
+  checks.forEach(c => {
+    let penalty = 0;
+    if (c.status === 'fail') penalty = 10;
+    else if (c.status === 'warning') penalty = 4;
+    
+    if (c.severity === 'critical') penalty *= 1.5;
+    if (c.severity === 'low') penalty *= 0.5;
+
+    // Apply confidence factor
+    let appliedPenalty = penalty * cf;
+    
+    if (c.status === 'fail' || c.status === 'warning') {
+      if (c.category === 'governance') govEarned -= appliedPenalty;
+      if (c.category === 'risk') riskEarned -= appliedPenalty;
+      if (c.category === 'compliance') compEarned -= appliedPenalty;
+      if (c.category === 'userTrust') userEarned -= (appliedPenalty * 0.5);
     }
+    
+    if (c.status === 'fail' && c.severity === 'critical') criticalFailsCount++;
   });
 
-  const govp = govPossible > 0 ? govPossible : 1;
-  const riskp = riskPossible > 0 ? riskPossible : 1;
-  const compp = compPossible > 0 ? compPossible : 1;
-
-  let governance = Math.round((govEarned / govp) * 30);
-  let risk = Math.round((riskEarned / riskp) * 40);
-  let compliance = Math.round((compEarned / compp) * 30);
-
-  // USER TRUST
-  let userEarned = 0;
-  ['favicon', 'meta_description', 'open_graph', 'viewport', 'fonts', 'alt_text', 'broken_links', 'page_size', 'contact_info'].forEach(id => {
-    const hk = get(id);
-    if (hk.status && hk.status !== 'unverified') userEarned += hk.points || 0;
-  });
-  let userTrust = Math.round(userEarned);
-
-  return { governance, risk, compliance, userTrust, totalExcluded, criticalFailsCount };
+  return { 
+    governance: Math.max(0, Math.min(30, Math.round(govEarned))), 
+    risk: Math.max(0, Math.min(40, Math.round(riskEarned))), 
+    compliance: Math.max(0, Math.min(30, Math.round(compEarned))), 
+    userTrust: Math.max(0, Math.min(20, Math.round(userEarned))), 
+    totalExcluded, 
+    criticalFailsCount 
+  };
 }
 
 function applyCorrelations(checks, scores) {
@@ -1046,24 +1038,19 @@ function detectMismatches(checks, formAnswers) {
   return mm;
 }
 
-function calculateConfidence(checks, formAnswers, mismatches, totalExcluded) {
-  let conf = 50;
+function calculateConfidence(checks, formAnswers, mismatches, totalExcluded, siteClass, isEnterprise) {
+  let conf = 100;
   
-  const formQuestions = ['privacyPolicy','termsOfService','cookieConsent','dataDeletion','securityContact','dataStorage','collectPayments','paymentProcessor','thirdPartyAnalytics','teamMembers','mfa','securityAudit','userType','serveEU','serveUnder18','regulations','incidentResponse'];
-  const answered = formQuestions.filter(k => formAnswers[k] && formAnswers[k] !== 'Not sure' && formAnswers[k] !== '').length;
-  if (answered >= 12) conf += 15;
-  else if (answered >= 6) conf += 7;
-
-  if (!checks.some(c => c.confidenceNote && c.confidenceNote.includes('Could not reach'))) conf += 10;
-  if (checks.filter(c => c.confidence === 'low' && !c._unverified).length === 0) conf += 10;
+  if (siteClass === 'bot_blocked') conf -= 50;
+  else if (siteClass === 'spa') conf -= 20;
+  else if (siteClass === 'webapp') conf -= 10;
   
-  if (mismatches.length === 0) conf += 15;
-  else conf -= Math.min(30, mismatches.length * 10);
+  if (isEnterprise) conf -= 15;
 
-  if (checks.some(c => c.id === 'hibp' && c._noBreaches && c.confidenceNote && c.confidenceNote.includes('key not set'))) conf -= 5;
-
-  if (totalExcluded > 15) conf -= 20;
-  else if (totalExcluded > 8) conf -= 10;
+  const lowConfChecks = checks.filter(c => c.confidence === 'low' || c.status === 'warning').length;
+  conf -= (lowConfChecks * 2);
+  
+  if (mismatches.length > 0) conf -= (mismatches.length * 5);
 
   return Math.max(0, Math.min(100, conf));
 }
@@ -1207,16 +1194,17 @@ app.get('/api/scan/stream', async (req, res) => {
 
   const send = data => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
-  let normalizedUrl, domain;
+  let normalizedUrl, domain, rootDomain;
   try {
     normalizedUrl = normalizeURL(rawUrl);
-    domain = extractDomain(normalizedUrl);
+    domain = new URL(normalizedUrl).hostname.replace(/^www\./, '');
+    rootDomain = extractRootDomain(normalizedUrl);
   } catch (e) {
     send({ type: 'error', message: e.message });
     return res.end();
   }
 
-  send({ type: 'start', domain, message: 'Starting scan...' });
+  send({ type: 'start', domain: rootDomain, message: 'Starting scan...' });
 
   const checks = [];
   const run = async (fn, ...args) => {
@@ -1250,34 +1238,37 @@ app.get('/api/scan/stream', async (req, res) => {
       run(checkHTTPS, domain),
       run(checkSecurityHeaders, domain),
       run(checkExposedPaths, domain),
-      run(checkSPF, domain),
-      run(checkDMARC, domain),
-      run(checkDKIM, domain),
+      run(checkSPF, rootDomain),
+      run(checkDMARC, rootDomain),
+      run(checkDKIM, rootDomain),
       run(checkCookieFlags, domain),
       run(checkRobots, domain),
       run(checkSitemap, domain),
-      run(checkHIBP, domain),
+      run(checkHIBP, rootDomain),
       run(checkRedirects, domain)
     ]);
 
     const { html, size } = await fetchHTML(domain);
+    const siteClass = classifySite(html, size);
+    let isEnterprise = ['google', 'whatsapp', 'microsoft', 'apple', 'amazon', 'netflix', 'facebook'].some(k => rootDomain.includes(k));
+
     await Promise.allSettled([
-      run(checkThirdPartyScripts, html, domain),
-      run(checkPrivacyPolicy, html, domain),
-      run(checkToS, html, domain),
+      run(checkThirdPartyScripts, html, domain, isEnterprise),
+      run(checkPrivacyPolicy, html, domain, siteClass),
+      run(checkToS, html, domain, siteClass),
       run(checkCookieConsent, html),
       run(checkFavicon, html),
       run(checkMetaDescription, html),
-      run(checkOpenGraph, html),
+      run(checkOpenGraph, html, siteClass),
       run(checkViewport, html),
       run(checkFonts, html),
-      run(checkAltText, html),
+      run(checkAltText, html, siteClass),
       run(checkBrokenLinks, html, domain),
       run(checkPageSize, size),
-      run(checkContact, html, domain)
+      run(checkContact, html, domain, siteClass)
     ]);
 
-    const objScores = calculateScores(checks, formAnswers);
+    const objScores = calculateScores(checks, formAnswers, siteClass, isEnterprise);
     const correlations = applyCorrelations(checks, objScores);
     const mismatches = detectMismatches(checks, formAnswers);
     // Apply mismatch penalties
@@ -1292,24 +1283,30 @@ app.get('/api/scan/stream', async (req, res) => {
     });
 
     // Recalculate total after mismatch penalties
-    objScores.total = objScores.governance + objScores.risk + objScores.compliance;
+    objScores.total = Math.max(0, Math.min(100, objScores.governance + objScores.risk + objScores.compliance));
     const bandFinal = getScoreBand(objScores.total);
     objScores.grade = bandFinal.grade;
 
-    const confidence = calculateConfidence(checks, formAnswers, mismatches, objScores.totalExcluded);
+    const confidence = calculateConfidence(checks, formAnswers, mismatches, objScores.totalExcluded, siteClass, isEnterprise);
     
     // Calculate final verdict (v2.1)
     let verdict = 'Needs Improvement';
-    let confidenceNote = 'Medium confidence: Mixed signals or some unverified components.';
+    let confidenceNote = 'Medium confidence scan.';
+    
+    if (isEnterprise) {
+      confidenceNote = 'Large-scale infrastructure detected — some checks approximated.';
+    } else if (siteClass === 'bot_blocked') {
+      confidenceNote = 'Bot protection detected. Confidence significantly reduced.';
+    } else if (siteClass === 'spa') {
+      confidenceNote = 'Single Page App architecture detected. Some DOM tests bypassed.';
+    }
+
     if (objScores.total < 50 && confidence >= 75) {
       verdict = 'Bad / At Risk';
-      confidenceNote = 'High confidence: Critical verified vulnerabilities detected.';
     } else if (objScores.total >= 70 && confidence >= 75) {
       verdict = 'Good / Excellent';
-      confidenceNote = 'High confidence: Secure posture observed safely.';
     } else if (objScores.total < 70 && confidence < 50 && objScores.criticalFailsCount === 0) {
       verdict = 'Inconclusive / Likely Safe';
-      confidenceNote = 'Low confidence: No critical flaws found, but significant data is unverified or dynamically rendered.';
     }
 
     const riskDNA = calculateRiskDNA(checks, formAnswers);
