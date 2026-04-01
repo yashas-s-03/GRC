@@ -10,6 +10,25 @@ const cheerio = require('cheerio');
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || "us-east-1" });
 
+// Verify critical functions exist at startup
+const requiredFunctions = [
+  'fetchHTML', 
+  'checkSSL', 
+  'checkHTTPS',
+  'checkSecurityHeaders',
+  'calculateScores',
+  'generateActionPlan'
+];
+
+requiredFunctions.forEach(fnName => {
+  if (typeof eval(fnName) !== 'function') {
+    console.error(`STARTUP ERROR: ${fnName} is not defined!`);
+    process.exit(1); // Crash on startup, not mid-scan
+  }
+});
+
+console.log('✓ All scanner functions verified');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const HIBP_KEY = process.env.HIBP_API_KEY || '';
@@ -726,28 +745,73 @@ async function checkRedirects(domain) {
 
 // ─── UI/UX Checks (User Trust) ────────────────────────────────────────────────
 
-async function fetchHTMLWithConfidence(url) {
+async function fetchHTML(url) {
   try {
-    const response = await makeAxios({ maxRedirects: 5 }).get(`https://${url}`, {
+    const response = await axios.get(`https://${url}`, {
+      timeout: 10000,
+      maxRedirects: 5,
+      validateStatus: () => true,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+          'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+          'Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive'
       }
     });
     
-    const html = typeof response.data === 'string' ? response.data : '';
-    const htmlSize = Buffer.byteLength(html, 'utf8');
+    const html = response.data || '';
+    const htmlSize = Buffer.byteLength(
+      typeof html === 'string' ? html : JSON.stringify(html), 
+      'utf8'
+    );
     
-    const isBotProtected = html.includes('cf-browser-verification') || html.includes('challenge-platform') || html.includes('__cf_chl') || html.includes('Ray ID') || htmlSize < 500;
-    const isSPA = html.includes('<div id="root">') || html.includes('<div id="app">') || (html.includes('bundle.js') && htmlSize < 5000) || html.includes('__NEXT_DATA__') || html.includes('data-reactroot');
-    const isEnterprise = htmlSize > 200000 || html.includes('akamai') || html.includes('fastly') || html.includes('cloudfront');
+    // Detect site type for confidence scoring
+    const htmlStr = typeof html === 'string' ? html : '';
     
-    const siteType = isBotProtected ? 'bot_blocked' : isSPA ? 'spa' : isEnterprise ? 'webapp' : 'static';
-
-    return { html, size: htmlSize, siteType, confidence: isBotProtected ? 'low' : isSPA ? 'medium' : 'high' };
-  } catch (e) {
-    return { html: '', size: 0, siteType: 'bot_blocked', confidence: 'low', error: e.message };
+    const isBotProtected = 
+      htmlStr.includes('cf-browser-verification') ||
+      htmlStr.includes('challenge-platform') ||
+      htmlStr.includes('__cf_chl') ||
+      htmlStr.includes('Ray ID') ||
+      htmlSize < 500;
+      
+    const isSPA = 
+      (htmlStr.includes('<div id="root">') ||
+       htmlStr.includes('<div id="app">')) &&
+      htmlSize < 5000;
+      
+    const isEnterprise = 
+      htmlSize > 200000 ||
+      htmlStr.includes('akamai') ||
+      htmlStr.includes('fastly');
+    
+    return {
+      html: htmlStr,
+      htmlSize,
+      headers: response.headers,
+      status: response.status,
+      confidence: isBotProtected ? 'low' 
+                : isSPA ? 'medium' 
+                : 'high',
+      siteType: isBotProtected ? 'bot-protected'
+              : isSPA ? 'spa'
+              : isEnterprise ? 'enterprise'
+              : 'standard'
+    };
+    
+  } catch (error) {
+    // Return empty but valid object so checks don't crash
+    return {
+      html: '',
+      htmlSize: 0,
+      headers: {},
+      status: 0,
+      confidence: 'low',
+      siteType: 'unreachable',
+      error: error.message
+    };
   }
 }
 
@@ -1084,6 +1148,27 @@ function applyConfidencePenalty(scores, checks) {
   }
 }
 
+function applyScoreCaps(scores, checks) {
+  const sslCheck = checks.find(c => c.id === 'ssl');
+  const httpsCheck = checks.find(c => c.id === 'https_enforcement');
+  
+  const sslFailed = sslCheck?.status === 'fail' && sslCheck?.severity === 'critical';
+  const httpsFailed = httpsCheck?.status === 'fail';
+  
+  // A site with broken SSL/HTTPS cannot be trusted
+  // Cap at 49 (grade C maximum)
+  if (sslFailed && httpsFailed && scores.total > 49) {
+    scores.total = 49;
+    scores.grade = 'C';
+    scores.cappedReason = 
+      'Score capped at 49: This site has no valid SSL ' +
+      'certificate and does not enforce HTTPS. Users ' +
+      'browsers will show "Not Secure" warnings.';
+  }
+  
+  return scores;
+}
+
 function calculateRiskDNA(checks, formAnswers) {
   const get = (id) => checks.find(c => c.id === id) || {};
   const statusToPts = (s) => s === 'pass' ? 20 : s === 'warning' ? 10 : 0;
@@ -1282,8 +1367,7 @@ app.get('/api/scan/stream', async (req, res) => {
       run(checkRedirects, domain)
     ]);
 
-    const { html, size } = await fetchHTML(domain);
-    const siteClass = classifySite(html, size);
+    const { html, htmlSize: size, siteType: siteClass, confidence: htmlConfidence } = await fetchHTML(domain);
     let isEnterprise = ['google', 'whatsapp', 'microsoft', 'apple', 'amazon', 'netflix', 'facebook'].some(k => rootDomain.includes(k));
 
     await Promise.allSettled([
@@ -1320,20 +1404,13 @@ app.get('/api/scan/stream', async (req, res) => {
     objScores.total = Math.max(0, Math.min(100, objScores.governance + objScores.risk + objScores.compliance + objScores.userTrust));
     
     applyConfidencePenalty(objScores, checks);
-
-    // Apply SSL/HTTPS Cap
-    const sslCheck = checks.find(c => c.id === 'ssl');
-    const httpsCheck = checks.find(c => c.id === 'https_enforcement');
-    if ((sslCheck && sslCheck.status === 'fail' && sslCheck.severity === 'critical') ||
-        (httpsCheck && httpsCheck.status === 'fail')) {
-      if (objScores.total > 49) {
-        objScores.total = 49;
-        objScores.cappedReason = 'Score capped: SSL/HTTPS failure makes this site fundamentally unsafe regardless of other checks passing.';
-      }
-    }
+    applyScoreCaps(objScores, checks);
 
     const bandFinal = getScoreBand(objScores.total);
-    objScores.grade = bandFinal.grade;
+    // Grade might have been set by cappedReason, so only overwrite if not capped
+    if (!objScores.cappedReason) {
+      objScores.grade = bandFinal.grade;
+    }
 
     const confidence = calculateConfidence(checks, formAnswers, mismatches, objScores.totalExcluded, siteClass, isEnterprise);
     
@@ -1448,9 +1525,11 @@ Do not use bullet points or markdown styling. Just output the sentences clearly.
       previousScore: prev?.scores.total ?? null,
       correlations, mismatches, confidence, riskDNA, aiSummary
     });
-  } catch (err) {
-    console.error('Scan error:', err);
-    send({ type: 'error', message: 'Scanner error: ' + err.message });
+  } catch (masterError) {
+    console.error('Master scan error:', masterError);
+    send({ type: 'error', message: `Scanner error: ${masterError.message}` });
+    res.end();
+    return;
   }
 
   res.end();

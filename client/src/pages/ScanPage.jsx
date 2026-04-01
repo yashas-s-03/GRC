@@ -239,9 +239,21 @@ export default function ScanPage({ scannedUrl, setScanResult, showToast }) {
 
       if (data.type === 'error') {
         es.close()
-        setScanError(data.message)
+        
+        let userMessage = data.message || 'Unknown error';
+        if (userMessage.includes('is not defined') || userMessage.includes('Cannot read') || userMessage.includes('TypeError')) {
+          userMessage = 'Scanner encountered an internal error. Please try again.';
+        }
+        if (userMessage.includes('ENOTFOUND') || userMessage.includes('getaddrinfo')) {
+          userMessage = "We couldn't reach that domain. Please check the URL and try again.";
+        }
+        if (userMessage.includes('ETIMEDOUT') || userMessage.includes('timeout')) {
+          userMessage = "The site took too long to respond. Try again in a moment.";
+        }
+        
+        setScanError(userMessage)
         setStep(1) // back to form
-        showToast?.('Scan failed: ' + data.message, 'error')
+        showToast?.('Scan failed: ' + userMessage, 'error')
       }
     }
 
